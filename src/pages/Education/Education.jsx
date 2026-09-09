@@ -1,16 +1,15 @@
-// 필요한 라이브러리들을 모두 import 합니다.
-// npm install react-webcam @mediapipe/holistic @mediapipe/camera_utils @mediapipe/drawing_utils onnxruntime-web react-icons
 import React, { useState, useEffect, useRef } from 'react';
 import Webcam from 'react-webcam';
 import { Holistic } from '@mediapipe/holistic';
 import { Camera } from '@mediapipe/camera_utils';
-import { InferenceSession, Tensor } from 'onnxruntime-web';
-import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
-import { POSE_CONNECTIONS, HAND_CONNECTIONS } from '@mediapipe/holistic';
 
 import Header from '../../components/Header/Header';
 import { IoEyeOutline, IoHappyOutline, IoEnterOutline, IoHelpCircleOutline, IoCheckmarkCircle } from "react-icons/io5";
 import './Education.css';
+import {
+  MIRROR_MODEL_INPUT, MIRROR_PREVIEW, HOLISTIC_OPTIONS,
+  CAPTURE_WIDTH, CAPTURE_HEIGHT, resolveMediaPipeFile,
+} from '../../lib/signConfig';
 
 // 학습할 단어 데이터
 const challenges = [
@@ -22,99 +21,8 @@ const challenges = [
 
 ];
 
-// ==================================================================
-// 키포인트 추출 (411차원)
-//
-// 학습 시 전처리와 반드시 일치해야 하므로 run_translator.py의
-// extract_and_normalize_keypoints를 그대로 옮긴 것이다. 로직을 바꾸면
-// 모델 입력 분포가 달라져 인식이 되지 않으니 원본과 함께 수정해야 한다.
-//
-// 구성: 포즈 25 + 얼굴 70 + 왼손 21 + 오른손 21 = 137개, 각 [x, y, c] → 411
-// ==================================================================
-const NUM_POSE = 25;
-const NUM_FACE = 70;
-const NUM_HAND = 21;
-const NUM_KEYPOINTS = NUM_POSE + NUM_FACE + NUM_HAND * 2; // 137
-const KEYPOINT_DIM = NUM_KEYPOINTS * 3;                   // 411
-const SEQUENCE_LENGTH = 150;
-
-// 학습 데이터가 OpenPose BODY_25 순서라서, MediaPipe Pose 인덱스로 바꿔 읽는다.
-// 인덱스 1(목)은 MediaPipe에 없어 양 어깨의 중점으로 따로 만든다.
-// 뒤쪽 0들은 BODY_25의 발 키포인트 자리인데 MediaPipe가 주지 않아 원본도 코(0)로 채운다.
-const OP_FROM_MP_INDICES = [0, 0, 12, 14, 16, 11, 13, 15, 24, 26, 28, 23, 25, 27, 5, 2, 8, 1, 7, 0, 0, 0, 0, 0, 0];
-
-const extractAndNormalizeKeypoints = (results) => {
-  const pose = results.poseLandmarks;
-  const face = results.faceLandmarks;
-
-  // 입력 프레임이 좌우 반전된 거울상이라, MediaPipe가 붙인 left/right 라벨은
-  // 실제 사람의 좌우와 반대다. 여기서 되돌려 해부학적 좌우로 맞춘다.
-  // (반전은 startMediaPipeCamera에서 수행한다. 반전을 없애면 이 교체도 함께 없애야 한다.)
-  const actualLeftHand = results.rightHandLandmarks;
-  const actualRightHand = results.leftHandLandmarks;
-
-  const pts = []; // [x, y, c] 137개
-
-  if (pose && pose[11] && pose[12]) {
-    const neckX = (pose[11].x + pose[12].x) / 2;
-    const neckY = (pose[11].y + pose[12].y) / 2;
-    for (let i = 0; i < NUM_POSE; i++) {
-      if (i === 1) {
-        pts.push([neckX, neckY, 0.9]); // 목은 합성한 점이라 신뢰도를 고정값으로 준다
-        continue;
-      }
-      const lm = pose[OP_FROM_MP_INDICES[i]];
-      pts.push(lm ? [lm.x, lm.y, lm.visibility ?? 0] : [0, 0, 0]);
-    }
-  } else {
-    for (let i = 0; i < NUM_POSE; i++) pts.push([0, 0, 0]);
-  }
-
-  // 얼굴은 468개 중 앞 70개만 쓴다. 세 번째 값은 원본과 같이 0.
-  for (let i = 0; i < NUM_FACE; i++) {
-    const lm = face && face[i];
-    pts.push(lm ? [lm.x, lm.y, 0] : [0, 0, 0]);
-  }
-
-  for (const hand of [actualLeftHand, actualRightHand]) {
-    for (let i = 0; i < NUM_HAND; i++) {
-      const lm = hand && hand[i];
-      pts.push(lm ? [lm.x, lm.y, 0] : [0, 0, 0]);
-    }
-  }
-
-  const keypoints = new Float32Array(KEYPOINT_DIM);
-
-  // 목이 안 잡히면 정규화 기준이 없다. 원본과 동일하게 0 벡터를 돌려준다.
-  const neck = pts[1];
-  if (neck[0] === 0 && neck[1] === 0) {
-    return { keypoints, handsDetected: false };
-  }
-
-  // 어깨 너비로 나눠 카메라와의 거리 차이를 없앤다.
-  const leftShoulder = pts[5];
-  const rightShoulder = pts[2];
-  let scale = 1;
-  if (
-    leftShoulder[0] !== 0 && leftShoulder[1] !== 0 &&
-    rightShoulder[0] !== 0 && rightShoulder[1] !== 0
-  ) {
-    const dist = Math.hypot(
-      leftShoulder[0] - rightShoulder[0],
-      leftShoulder[1] - rightShoulder[1]
-    );
-    if (dist > 1e-4) scale = dist;
-  }
-
-  for (let i = 0; i < NUM_KEYPOINTS; i++) {
-    const [x, y, c] = pts[i];
-    keypoints[i * 3] = (x - neck[0]) / scale;
-    keypoints[i * 3 + 1] = (y - neck[1]) / scale;
-    keypoints[i * 3 + 2] = c; // 신뢰도는 좌표가 아니므로 정규화하지 않는다
-  }
-
-  return { keypoints, handsDetected: Boolean(actualLeftHand || actualRightHand) };
-};
+// 특징 스키마와 추론은 Phase 1에서 새로 정의한다. (ARCHITECTURE.md 참고)
+// 구 411차원 구현은 OpenPose 기반 모델 전용이라 제거했다.
 
 // 1. 인트로 화면 컴포넌트 (변경 없음)
 const IntroScreen = ({ onGameStart }) => (
@@ -166,34 +74,14 @@ const GameScreen = ({ onCorrectAnswer, currentChallengeIndex }) => {
   const canvasRef = useRef(null);
   const videoRef = useRef(null); // ✅ 비디오 요소를 위한 ref 추가
 
-  const onnxSession = useRef(null);
-  const sequence = useRef([]);
   const cameraRef = useRef(null);
 
   // ✅ 영상 재생 횟수를 추적하는 state 추가
   const [playCount, setPlayCount] = useState(0);
 
-  const classLabels = ['감기', '고민', '라면', '수어', '슬프다'];
   const currentChallenge = challenges[currentChallengeIndex];
 
-  // AI 모델 로드 및 MediaPipe Holistic 설정 (카메라 시작 로직은 분리)
-  useEffect(() => {
-    const setupModelAndHolistic = async () => {
-      // 1. ONNX 모델 로드
-      try {
-        const session = await InferenceSession.create('/sign_language_model_5_words.onnx', {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-        });
-        onnxSession.current = session;
-        console.log("ONNX Model loaded.");
-      } catch (e) {
-        console.error("ONNX 모델 로딩 실패.", e);
-      }
-    };
-
-    setupModelAndHolistic();
-  }, []); // 최초 1회만 실행
+  // Phase 1에서 지문자 모델 로딩이 여기에 들어간다.
 
   // ✅ 문제가 바뀌면 재생 횟수를 리셋
   useEffect(() => {
@@ -203,84 +91,60 @@ const GameScreen = ({ onCorrectAnswer, currentChallengeIndex }) => {
 
   // ✅ 웹캠이 성공적으로 켜졌을 때 MediaPipe 카메라를 시작하는 함수
   const startMediaPipeCamera = () => {
-    const holistic = new Holistic({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
-    });
-
-    holistic.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: true,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5
-    });
-
+    const holistic = new Holistic({ locateFile: resolveMediaPipeFile('holistic') });
+    holistic.setOptions(HOLISTIC_OPTIONS);
     holistic.onResults(onResults);
 
-    if (webcamRef.current && webcamRef.current.video) {
-      const video = webcamRef.current.video;
+    if (!webcamRef.current || !webcamRef.current.video) return;
+    const video = webcamRef.current.video;
 
-      // 학습 파이프라인(run_translator.py)은 cv2.flip(frame, 1)로 좌우를 뒤집은 뒤
-      // MediaPipe에 넣는다. 그래서 MediaPipe가 붙이는 left/right 라벨과 x좌표가
-      // 전부 거울상 기준이고, extractAndNormalizeKeypoints의 손 좌우 교체도
-      // 그 거울상을 되돌리기 위한 것이다.
-      //
-      // 반면 <Webcam mirrored>는 CSS 표시용이라 video 엘리먼트의 실제 픽셀은
-      // 뒤집히지 않는다. 그대로 넘기면 학습 때와 다른 입력이 되므로,
-      // 여기서 캔버스로 직접 좌우를 뒤집어 넣는다.
-      const mirrorCanvas = document.createElement('canvas');
-      const mirrorCtx = mirrorCanvas.getContext('2d');
+    // 모델에 넣는 영상의 좌우 반전 여부는 signConfig 한 곳에서만 정한다.
+    // <Webcam mirrored>는 CSS라 표시만 바꾸고 실제 픽셀은 그대로이므로,
+    // 반전이 필요하면 캔버스에 직접 그려야 한다.
+    const mirrorCanvas = MIRROR_MODEL_INPUT ? document.createElement('canvas') : null;
+    const mirrorCtx = mirrorCanvas ? mirrorCanvas.getContext('2d') : null;
 
-      cameraRef.current = new Camera(video, {
-        onFrame: async () => {
-          if (!webcamRef.current || !webcamRef.current.video) return;
+    const toModelInput = () => {
+      if (!MIRROR_MODEL_INPUT) return video;
 
-          const w = video.videoWidth;
-          const h = video.videoHeight;
-          if (!w || !h) return; // 첫 프레임 전에는 크기가 0이다
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (!w || !h) return null; // 첫 프레임 전에는 크기가 0이다
 
-          if (mirrorCanvas.width !== w || mirrorCanvas.height !== h) {
-            mirrorCanvas.width = w;
-            mirrorCanvas.height = h;
-          }
+      if (mirrorCanvas.width !== w || mirrorCanvas.height !== h) {
+        mirrorCanvas.width = w;
+        mirrorCanvas.height = h;
+      }
+      // setTransform(-1, 0, 0, 1, w, 0) → x' = w - x (좌우 반전)
+      mirrorCtx.setTransform(-1, 0, 0, 1, w, 0);
+      mirrorCtx.drawImage(video, 0, 0, w, h);
+      mirrorCtx.setTransform(1, 0, 0, 1, 0, 0);
+      return mirrorCanvas;
+    };
 
-          // setTransform(-1, 0, 0, 1, w, 0) → x' = w - x (좌우 반전)
-          mirrorCtx.setTransform(-1, 0, 0, 1, w, 0);
-          mirrorCtx.drawImage(video, 0, 0, w, h);
-          mirrorCtx.setTransform(1, 0, 0, 1, 0, 0);
-
-          await holistic.send({ image: mirrorCanvas });
-        },
-        width: 640,
-        height: 480
-      });
-      cameraRef.current.start();
-      console.log("MediaPipe Camera started.");
-    }
+    cameraRef.current = new Camera(video, {
+      onFrame: async () => {
+        if (!webcamRef.current || !webcamRef.current.video) return;
+        const image = toModelInput();
+        if (image) await holistic.send({ image });
+      },
+      width: CAPTURE_WIDTH,
+      height: CAPTURE_HEIGHT,
+    });
+    cameraRef.current.start();
   };
 
+  const onResults = (results) => {
+    if (!webcamRef.current || !canvasRef.current) return;
 
-  const onResults = async (results) => {
-    // AI 추론 로직은 그대로 유지 (필요 시 주석 처리 또는 삭제)
-    // 현재 요구사항은 영상 2회 재생 후 정답 처리이므로, 이 부분의 중요도는 낮아짐
-    if (!webcamRef.current || !canvasRef.current || !onnxSession.current) {
-      return;
-    }
     const canvasCtx = canvasRef.current.getContext("2d");
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    // 랜드마크 그리기 등 시각적 피드백이 필요하면 여기에 코드 추가
+    // 랜드마크 시각화가 필요하면 여기에 그린다.
     canvasCtx.restore();
 
-    // 학습 때와 동일한 411차원 벡터를 만들어 최근 150프레임을 유지한다.
-    const { keypoints } = extractAndNormalizeKeypoints(results);
-    sequence.current.push(keypoints);
-    if (sequence.current.length > SEQUENCE_LENGTH) {
-      sequence.current = sequence.current.slice(-SEQUENCE_LENGTH);
-    }
-
-    // TODO: 여기서 onnxSession.current.run()을 호출해 실제 추론을 연결해야 한다.
+    // TODO(Phase 1): 여기서 특징을 추출해 지문자 모델에 넘긴다.
     // 현재 채점은 handleVideoEnded의 영상 재생 횟수로만 이뤄지며 모델과 무관하다.
-    // 입력 텐서는 [1, SEQUENCE_LENGTH, KEYPOINT_DIM] 형태로 만들면 된다.
   };
 
   // ✅ 영상 재생이 끝날 때마다 호출되는 함수
@@ -327,7 +191,7 @@ const GameScreen = ({ onCorrectAnswer, currentChallengeIndex }) => {
             <Webcam
               ref={webcamRef}
               audio={false}
-              mirrored={true}
+              mirrored={MIRROR_PREVIEW}
               onUserMedia={startMediaPipeCamera}
               style={{
                 position: 'absolute', left: 0, top: 0,
