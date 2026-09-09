@@ -99,7 +99,11 @@ if (sequence.current.length === 150) {
 이식하면서 지켜야 했던 원본의 특성들:
 - 학습 데이터가 **OpenPose BODY_25 순서**라 MediaPipe 인덱스를 재배열합니다 (`OP_FROM_MP_INDICES`)
 - **목(index 1)은 MediaPipe에 없어** 양 어깨 중점으로 합성하며 신뢰도를 0.9로 고정합니다
-- 원본이 **좌우 손을 바꿔서** 사용합니다 (`actualLeftHand = results.rightHandLandmarks`)
+- **입력 프레임을 좌우 반전한 뒤** MediaPipe에 넣습니다 (`run_translator.py:137`의 `cv2.flip(frame, 1)`)
+  → 거울상이라 MediaPipe의 left/right 라벨이 실제 사람의 좌우와 반대가 되고,
+  그래서 손을 **바꿔서** 담습니다 (`actualLeftHand = results.rightHandLandmarks`).
+  브라우저의 `<Webcam mirrored>`는 CSS 표시용이라 픽셀이 뒤집히지 않으므로,
+  `startMediaPipeCamera`에서 캔버스로 직접 반전해 학습 때와 같은 입력을 만듭니다.
 - 좌표는 목을 원점으로 옮긴 뒤 **어깨 너비로 나눠** 카메라 거리 차이를 없앱니다
 - 세 번째 값(신뢰도)은 **정규화하지 않습니다**
 - 목이 잡히지 않으면 411개 전부 0을 반환합니다

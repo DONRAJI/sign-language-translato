@@ -47,7 +47,9 @@ const extractAndNormalizeKeypoints = (results) => {
   const pose = results.poseLandmarks;
   const face = results.faceLandmarks;
 
-  // 원본이 좌우를 바꿔 쓴다. 학습 데이터와 맞추기 위한 것이므로 그대로 둔다.
+  // 입력 프레임이 좌우 반전된 거울상이라, MediaPipe가 붙인 left/right 라벨은
+  // 실제 사람의 좌우와 반대다. 여기서 되돌려 해부학적 좌우로 맞춘다.
+  // (반전은 startMediaPipeCamera에서 수행한다. 반전을 없애면 이 교체도 함께 없애야 한다.)
   const actualLeftHand = results.rightHandLandmarks;
   const actualRightHand = results.leftHandLandmarks;
 
@@ -215,11 +217,38 @@ const GameScreen = ({ onCorrectAnswer, currentChallengeIndex }) => {
     holistic.onResults(onResults);
 
     if (webcamRef.current && webcamRef.current.video) {
-      cameraRef.current = new Camera(webcamRef.current.video, {
+      const video = webcamRef.current.video;
+
+      // 학습 파이프라인(run_translator.py)은 cv2.flip(frame, 1)로 좌우를 뒤집은 뒤
+      // MediaPipe에 넣는다. 그래서 MediaPipe가 붙이는 left/right 라벨과 x좌표가
+      // 전부 거울상 기준이고, extractAndNormalizeKeypoints의 손 좌우 교체도
+      // 그 거울상을 되돌리기 위한 것이다.
+      //
+      // 반면 <Webcam mirrored>는 CSS 표시용이라 video 엘리먼트의 실제 픽셀은
+      // 뒤집히지 않는다. 그대로 넘기면 학습 때와 다른 입력이 되므로,
+      // 여기서 캔버스로 직접 좌우를 뒤집어 넣는다.
+      const mirrorCanvas = document.createElement('canvas');
+      const mirrorCtx = mirrorCanvas.getContext('2d');
+
+      cameraRef.current = new Camera(video, {
         onFrame: async () => {
-          if (webcamRef.current && webcamRef.current.video) {
-            await holistic.send({ image: webcamRef.current.video });
+          if (!webcamRef.current || !webcamRef.current.video) return;
+
+          const w = video.videoWidth;
+          const h = video.videoHeight;
+          if (!w || !h) return; // 첫 프레임 전에는 크기가 0이다
+
+          if (mirrorCanvas.width !== w || mirrorCanvas.height !== h) {
+            mirrorCanvas.width = w;
+            mirrorCanvas.height = h;
           }
+
+          // setTransform(-1, 0, 0, 1, w, 0) → x' = w - x (좌우 반전)
+          mirrorCtx.setTransform(-1, 0, 0, 1, w, 0);
+          mirrorCtx.drawImage(video, 0, 0, w, h);
+          mirrorCtx.setTransform(1, 0, 0, 1, 0, 0);
+
+          await holistic.send({ image: mirrorCanvas });
         },
         width: 640,
         height: 480
