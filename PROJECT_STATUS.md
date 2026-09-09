@@ -39,7 +39,7 @@ AI Hub 데이터를 쓴 것은 저장소에 남은 흔적으로 확인됩니다.
 | # | 기능 | 상태 | 요약 |
 |---|---|---|---|
 | 1 | 랜딩 / 라우팅 / UI | ✅ **완성** | Splash·Home·Header·Hero·Features·Steps·FinalCTA 전부 JSX+CSS 완비 |
-| 2 | 수어 학습 게임 화면 | ⚠️ **껍데기만** | 화면·영상·웹캠·모델 로딩까지는 되지만 **채점이 가짜** |
+| 2 | 수어 학습 게임 화면 | ⚠️ **채점이 가짜** | 전처리는 정상화됨. 추론 호출과 채점 연결이 남음 |
 | 3 | 실시간 단어 번역 | ❌ **미구현** | 목표 기능. 어떤 경로로도 단어를 인식하지 못함 |
 | 4 | 실시간 지문자 번역 | 🟡 **부분 동작** | 자음·모음 31자. 단어가 아니며 구조적 결함 있음 |
 | 5 | 문장 조합 | ⚠️ **임시 구현** | 단어 3개를 공백으로 잇는 게 전부. 수어 문법 처리 없음 |
@@ -82,24 +82,31 @@ if (sequence.current.length === 150) {
 
 > 즉 "5개 단어가 동작했다"기보다, **5개 단어짜리 시연 연출**에 가깝습니다.
 
-### 3-2. 키포인트 차원이 애초에 맞지 않습니다 🔴
+### 3-2. 키포인트 차원이 애초에 맞지 않았습니다 ✅ 해결됨
 
 모델이 요구하는 입력은 **411차원**이고, 그 정체는 학습 노트북에 적혀 있습니다.
 
 `handshack_ver4.ipynb` — `KEYPOINT_DIM = 411 # 137 keypoints * 3 (x, y, confidence)`
 
-그런데 프론트엔드는 전혀 다른 스키마로 258개를 만든 뒤 0으로 채웁니다.
+**(2026-09-09 해결)** 기존 프론트엔드는 전혀 다른 스키마로 258개(pose 33×4 + 양손 21×3×2)를
+만든 뒤 411까지 0으로 패딩했습니다. 개수가 아니라 좌표 구성 자체가 달라 패딩으로는 맞출 수 없었습니다.
 
-`src/pages/Education/Education.jsx:28` — `extractKeypoints`
-- pose 33개 × 4(x,y,z,visibility) = 132
-- 양손 21개 × 3 × 2 = 126
-- 합 258 → 411까지 **0으로 패딩**
+`run_translator.py:79`의 `extract_and_normalize_keypoints`를 JS로 이식해 해결했습니다.
+`src/pages/Education/Education.jsx`의 `extractAndNormalizeKeypoints`가 그것입니다.
 
-**단순히 개수가 모자란 게 아니라 좌표 구성 자체가 다릅니다.**
-패딩으로는 절대 맞출 수 없고, 설령 추론을 연결해도 의미 있는 결과가 나오지 않습니다.
+구성: **포즈 25 + 얼굴 70 + 왼손 21 + 오른손 21 = 137개 × [x, y, c] = 411**
 
-✅ **정답 구현이 저장소에 있습니다** — `run_translator.py:79` `extract_and_normalize_keypoints`
-pose 일부 + face 70개 + 양손을 **목(neck) 기준으로 정규화**합니다. 이것을 JS로 이식해야 합니다.
+이식하면서 지켜야 했던 원본의 특성들:
+- 학습 데이터가 **OpenPose BODY_25 순서**라 MediaPipe 인덱스를 재배열합니다 (`OP_FROM_MP_INDICES`)
+- **목(index 1)은 MediaPipe에 없어** 양 어깨 중점으로 합성하며 신뢰도를 0.9로 고정합니다
+- 원본이 **좌우 손을 바꿔서** 사용합니다 (`actualLeftHand = results.rightHandLandmarks`)
+- 좌표는 목을 원점으로 옮긴 뒤 **어깨 너비로 나눠** 카메라 거리 차이를 없앱니다
+- 세 번째 값(신뢰도)은 **정규화하지 않습니다**
+- 목이 잡히지 않으면 411개 전부 0을 반환합니다
+
+**검증:** 두 파일에서 함수를 실제로 추출해 동일 입력 7개 케이스(정상/얼굴없음/한손만/양손없음/
+포즈없음/어깨0)로 파이썬 원본과 JS 이식본을 비교했습니다.
+전 케이스 411차원 일치, 최대 절대오차 `2.4e-07` (float32 반올림 수준).
 
 ### 3-3. 지문자 번역기는 "움직임"을 아예 보지 못합니다 🟠
 
@@ -177,8 +184,8 @@ AI Hub에서 같은 파일을 다시 받으면 동일한 구성을 재현할 수
 |---|---|---|
 | 🔴 P0 | 학습 데이터 재확보 | AI Hub 재다운로드 → 키포인트 추출 → `.npy` 재생성 |
 | 🔴 P0 | 단어 인식 모델 재학습 | 목표 클래스 수 확정 후 `handshack_ver4.ipynb` 기준 재학습 |
-| 🔴 P0 | 411차원 전처리 JS 이식 | `run_translator.py`의 정규화 로직을 `Education.jsx`로 |
-| 🔴 P1 | 실제 추론 연결 | `session.run()` 호출 복구 + 진짜 채점 로직 |
+| ✅ 완료 | ~~411차원 전처리 JS 이식~~ | 2026-09-09 완료. 파이썬 원본과 수치 일치 검증됨 |
+| 🔴 P0 | 실제 추론 연결 | `session.run()` 호출 복구 + 진짜 채점 로직. **다음 작업** |
 | 🟠 P1 | 인식 스택 일원화 | 지문자(TFLite) / 단어(ONNX) 두 갈래를 하나로 |
 | 🟠 P1 | 시퀀스 전송 구조로 변경 | 단일 프레임 → 프레임 버퍼 전송 |
 | 🟡 P2 | 문장 조합 로직 | 단어 나열 → 수어 문법 반영 |
@@ -191,7 +198,7 @@ AI Hub에서 같은 파일을 다시 받으면 동일한 구성을 재현할 수
 | 대상 | 결과 |
 |---|---|
 | `npm start` → `/`, `/home` | ✅ 정상 |
-| `npm start` → `/education` | ⚠️ 화면은 뜨고 게임 진행되나 **채점이 가짜** |
+| `npm start` → `/education` | ⚠️ 411차원 벡터는 정상 생성됨. 다만 **채점은 여전히 가짜** |
 | `python api_server.py` → `/translator` | 🟡 지문자 31자 한정, 정확도 불안정 |
 | `python run_translator.py` | 🟡 5단어 ONNX. 파이썬 단독 실행이며 웹과 무관 |
 | `python webcam_word_sign_recognition.py` | ❌ `fonts/HMKMMAG.TTF` 없어 실행 불가 |
@@ -219,7 +226,7 @@ AI Hub에서 같은 파일을 다시 받으면 동일한 구성을 재현할 수
 | 채점이 가짜 | `src/pages/Education/Education.jsx:195` |
 | 추론 코드 없음 | `src/pages/Education/Education.jsx:181` (빈 블록), `session.run` 0건 |
 | 411 = 137×3 | `handshack_ver4.ipynb` `KEYPOINT_DIM` |
-| 258차원 패딩 | `src/pages/Education/Education.jsx:28` |
+| 411차원 이식본 | `src/pages/Education/Education.jsx` `extractAndNormalizeKeypoints` |
 | 411 정답 구현 | `run_translator.py:79` |
 | 단일 프레임 전송 | `src/pages/Translator/Translator.jsx:131` |
 | 프레임 복제로 가짜 시퀀스 | `api_server.py:109` (`seq = [features] * 10`) |

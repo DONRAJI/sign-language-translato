@@ -22,28 +22,96 @@ const challenges = [
 
 ];
 
-// 헬퍼 함수: MediaPipe 결과를 411차원 벡터로 변환
-// 🚨 중요: 이 함수는 모델 학습 시 사용한 데이터 전처리 방식과 완벽히 일치해야 합니다.
-// 아래는 일반적인 구현 예시이며, 실제 모델에 맞게 반드시 수정이 필요합니다.
-const extractKeypoints = (results) => {
-  // pose, left_hand, right_hand의 랜드마크 좌표(x,y,z,visibility)를 하나의 배열로 합칩니다.
-  const pose = results.poseLandmarks ? results.poseLandmarks.map(res => [res.x, res.y, res.z, res.visibility]).flat() : new Array(33 * 4).fill(0);
-  const lh = results.leftHandLandmarks ? results.leftHandLandmarks.map(res => [res.x, res.y, res.z]).flat() : new Array(21 * 3).fill(0);
-  const rh = results.rightHandLandmarks ? results.rightHandLandmarks.map(res => [res.x, res.y, res.z]).flat() : new Array(21 * 3).fill(0);
+// ==================================================================
+// 키포인트 추출 (411차원)
+//
+// 학습 시 전처리와 반드시 일치해야 하므로 run_translator.py의
+// extract_and_normalize_keypoints를 그대로 옮긴 것이다. 로직을 바꾸면
+// 모델 입력 분포가 달라져 인식이 되지 않으니 원본과 함께 수정해야 한다.
+//
+// 구성: 포즈 25 + 얼굴 70 + 왼손 21 + 오른손 21 = 137개, 각 [x, y, c] → 411
+// ==================================================================
+const NUM_POSE = 25;
+const NUM_FACE = 70;
+const NUM_HAND = 21;
+const NUM_KEYPOINTS = NUM_POSE + NUM_FACE + NUM_HAND * 2; // 137
+const KEYPOINT_DIM = NUM_KEYPOINTS * 3;                   // 411
+const SEQUENCE_LENGTH = 150;
 
-  let keypoints = [...pose, ...lh, ...rh];
+// 학습 데이터가 OpenPose BODY_25 순서라서, MediaPipe Pose 인덱스로 바꿔 읽는다.
+// 인덱스 1(목)은 MediaPipe에 없어 양 어깨의 중점으로 따로 만든다.
+// 뒤쪽 0들은 BODY_25의 발 키포인트 자리인데 MediaPipe가 주지 않아 원본도 코(0)로 채운다.
+const OP_FROM_MP_INDICES = [0, 0, 12, 14, 16, 11, 13, 15, 24, 26, 28, 23, 25, 27, 5, 2, 8, 1, 7, 0, 0, 0, 0, 0, 0];
 
-  // 🚨 현재 258개 특징점만 추출됩니다. 모델이 요구하는 411개에 맞추기 위해
-  // 어떤 데이터를 사용했는지 확인하고 이 부분을 수정해야 합니다.
-  // (예: faceLandmarks 포함, 랜드마크 간 각도/거리 계산 등)
-  // 여기서는 부족한 부분을 0으로 채우는(padding) 임시 처리를 합니다.
-  if (keypoints.length < 411) {
-      keypoints = keypoints.concat(new Array(411 - keypoints.length).fill(0));
-  } else if (keypoints.length > 411) {
-      keypoints = keypoints.slice(0, 411);
+const extractAndNormalizeKeypoints = (results) => {
+  const pose = results.poseLandmarks;
+  const face = results.faceLandmarks;
+
+  // 원본이 좌우를 바꿔 쓴다. 학습 데이터와 맞추기 위한 것이므로 그대로 둔다.
+  const actualLeftHand = results.rightHandLandmarks;
+  const actualRightHand = results.leftHandLandmarks;
+
+  const pts = []; // [x, y, c] 137개
+
+  if (pose && pose[11] && pose[12]) {
+    const neckX = (pose[11].x + pose[12].x) / 2;
+    const neckY = (pose[11].y + pose[12].y) / 2;
+    for (let i = 0; i < NUM_POSE; i++) {
+      if (i === 1) {
+        pts.push([neckX, neckY, 0.9]); // 목은 합성한 점이라 신뢰도를 고정값으로 준다
+        continue;
+      }
+      const lm = pose[OP_FROM_MP_INDICES[i]];
+      pts.push(lm ? [lm.x, lm.y, lm.visibility ?? 0] : [0, 0, 0]);
+    }
+  } else {
+    for (let i = 0; i < NUM_POSE; i++) pts.push([0, 0, 0]);
   }
 
-  return keypoints;
+  // 얼굴은 468개 중 앞 70개만 쓴다. 세 번째 값은 원본과 같이 0.
+  for (let i = 0; i < NUM_FACE; i++) {
+    const lm = face && face[i];
+    pts.push(lm ? [lm.x, lm.y, 0] : [0, 0, 0]);
+  }
+
+  for (const hand of [actualLeftHand, actualRightHand]) {
+    for (let i = 0; i < NUM_HAND; i++) {
+      const lm = hand && hand[i];
+      pts.push(lm ? [lm.x, lm.y, 0] : [0, 0, 0]);
+    }
+  }
+
+  const keypoints = new Float32Array(KEYPOINT_DIM);
+
+  // 목이 안 잡히면 정규화 기준이 없다. 원본과 동일하게 0 벡터를 돌려준다.
+  const neck = pts[1];
+  if (neck[0] === 0 && neck[1] === 0) {
+    return { keypoints, handsDetected: false };
+  }
+
+  // 어깨 너비로 나눠 카메라와의 거리 차이를 없앤다.
+  const leftShoulder = pts[5];
+  const rightShoulder = pts[2];
+  let scale = 1;
+  if (
+    leftShoulder[0] !== 0 && leftShoulder[1] !== 0 &&
+    rightShoulder[0] !== 0 && rightShoulder[1] !== 0
+  ) {
+    const dist = Math.hypot(
+      leftShoulder[0] - rightShoulder[0],
+      leftShoulder[1] - rightShoulder[1]
+    );
+    if (dist > 1e-4) scale = dist;
+  }
+
+  for (let i = 0; i < NUM_KEYPOINTS; i++) {
+    const [x, y, c] = pts[i];
+    keypoints[i * 3] = (x - neck[0]) / scale;
+    keypoints[i * 3 + 1] = (y - neck[1]) / scale;
+    keypoints[i * 3 + 2] = c; // 신뢰도는 좌표가 아니므로 정규화하지 않는다
+  }
+
+  return { keypoints, handsDetected: Boolean(actualLeftHand || actualRightHand) };
 };
 
 // 1. 인트로 화면 컴포넌트 (변경 없음)
@@ -174,13 +242,16 @@ const GameScreen = ({ onCorrectAnswer, currentChallengeIndex }) => {
     // 랜드마크 그리기 등 시각적 피드백이 필요하면 여기에 코드 추가
     canvasCtx.restore();
 
-    // AI 추론을 계속 사용하고 싶다면 아래 코드 유지
-    const keypoints = extractKeypoints(results);
+    // 학습 때와 동일한 411차원 벡터를 만들어 최근 150프레임을 유지한다.
+    const { keypoints } = extractAndNormalizeKeypoints(results);
     sequence.current.push(keypoints);
-    sequence.current = sequence.current.slice(-150);
-    if (sequence.current.length === 150) {
-      // ... (기존 AI 추론 코드) ...
+    if (sequence.current.length > SEQUENCE_LENGTH) {
+      sequence.current = sequence.current.slice(-SEQUENCE_LENGTH);
     }
+
+    // TODO: 여기서 onnxSession.current.run()을 호출해 실제 추론을 연결해야 한다.
+    // 현재 채점은 handleVideoEnded의 영상 재생 횟수로만 이뤄지며 모델과 무관하다.
+    // 입력 텐서는 [1, SEQUENCE_LENGTH, KEYPOINT_DIM] 형태로 만들면 된다.
   };
 
   // ✅ 영상 재생이 끝날 때마다 호출되는 함수
