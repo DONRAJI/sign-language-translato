@@ -65,7 +65,7 @@ const Steps = () => {
           <div className="testimonial-item">
             <p>“병원에서 의료진과 소통하는데 정말 도움이 되었어요.<br />빠르고 정확한 번역에 감사드립니다.”</p>
             <div className="author">
-              <img src="/홍민기.png" width={40} height={40} alt="홍민기님" />
+              <img src="/hongminki.png" width={40} height={40} alt="홍민기님" />
               <span>홍민기님 <small>직장인</small></span>
             </div>
           </div>
