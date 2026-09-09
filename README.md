@@ -5,6 +5,8 @@
 
 📎 [Figma 디자인 와이어프레임 보기](https://www.figma.com/design/YCfeoVBwRcilLT5Wubera3/%EC%86%90%EC%A7%93-SignBridge-?node-id=0-1&t=DYa9aM1dBQGEZ7xP-1)
 
+📋 **[프로젝트 기획 및 구현 현황 →](PROJECT_STATUS.md)** — 원래 목표 대비 무엇이 미구현이고 무엇이 소실됐는지 정리한 문서입니다.
+
 ---
 ## 👏 팀원 소개
 
