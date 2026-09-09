@@ -191,3 +191,9 @@ python api_server.py
 5. **`sing_lang_trans/web_app.py`는 사실상 레거시입니다.**
    SocketIO 방식에 서버 측에서 직접 웹캠(`cv2.VideoCapture(0)`)을 여는 구조라
    React가 사용하는 REST API(`api_server.py`)와는 다른 물건입니다.
+
+6. **`webcam_word_sign_recognition.py`는 `fonts/HMKMMAG.TTF`를 필요로 합니다.**
+   상용 한글 폰트(휴먼매직체)라 저장소에 포함하지 않았습니다.
+   해당 스크립트만 이 폰트에 의존하며, 나머지는 영향받지 않습니다.
+   참고로 `run_translator.py`에는 나눔고딕을 자동으로 내려받는 `download_font()`가 있으니
+   같은 방식으로 바꾸면 의존성을 없앨 수 있습니다.
