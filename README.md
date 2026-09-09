@@ -5,7 +5,9 @@
 
 📎 [Figma 디자인 와이어프레임 보기](https://www.figma.com/design/YCfeoVBwRcilLT5Wubera3/%EC%86%90%EC%A7%93-SignBridge-?node-id=0-1&t=DYa9aM1dBQGEZ7xP-1)
 
-📋 **[프로젝트 기획 및 구현 현황 →](PROJECT_STATUS.md)** — 원래 목표 대비 무엇이 미구현이고 무엇이 소실됐는지 정리한 문서입니다.
+📋 **[프로젝트 기획 및 구현 현황 →](PROJECT_STATUS.md)** — 원래 목표 대비 무엇이 미구현이고 무엇이 소실됐는지
+🧭 **[설계 지침 →](ARCHITECTURE.md)** — 최종 지향점 기준으로 어떤 구조를 고르면 무엇이 인식되지 않는가
+🗺 **[진행 계획 →](ROADMAP.md)** — 단계별 실행 계획과 각 단계의 완료 기준
 
 ---
 ## 👏 팀원 소개
